@@ -35,7 +35,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     appState.canvasContext = appState.canvasElement.getContext('2d');
     
     // تهيئة العناصر
-    initializeElements();
+    initializeElements();{
+    const cameraStatus = document.getElementById('camera-status');
+    const cameraType = appState.currentCamera === 'user' ? 'أمامية' : 'خلفية';
+    const width = appState.videoElement.videoWidth || 800;
+    const height = appState.videoElement.videoHeight || 600;
+    cameraStatus.textContent = `كاميرا: ${cameraType} (${width}×${height})`;
+}
+
     
     // تحميل النموذج
     await loadModel();
