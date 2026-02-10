@@ -1,243 +1,550 @@
-// المتغيرات الرئيسية
-const videoElement = document.getElementById('webcam-video');
-const canvasElement = document.getElementById('detection-canvas');
-const statusElement = document.getElementById('status');
-const toggleButton = document.getElementById('toggle-button');
-const logListElement = document.getElementById('detection-log-list'); 
-const clearLogButton = document.getElementById('clear-log-button');   
-const ctx = canvasElement.getContext('2d');
+// script.js - النسخة المحسنة
 
-let model = undefined;
-let isDetecting = false; 
-let stream = null; 
-let animationFrameId = null; 
-let detectionLog = []; // مصفوفة لتخزين سجل الاكتشافات في الذاكرة
+// حالة التطبيق
+const appState = {
+    isModelLoaded: false,
+    isDetecting: false,
+    isCameraActive: false,
+    isLogPaused: false,
+    currentStream: null,
+    currentCamera: 'user', // 'user' أو 'environment'
+    detectionInterval: null,
+    model: null,
+    videoElement: null,
+    canvasElement: null,
+    canvasContext: null,
+    stats: {
+        totalDetections: 0,
+        currentDetections: 0,
+        highestConfidence: 0,
+        fps: 0,
+        lastFrameTime: 0
+    },
+    detectionLog: [],
+    maxLogItems: 50,
+    objectColors: {} // ألوان ثابتة لكل نوع من الأشياء
+};
 
-// ------------------------------------------
-// دوال إدارة السجل (LOGGING FUNCTIONS)
-// ------------------------------------------
-
-/**
- * @function loadLog
- * @description تحميل سجل الاكتشافات من الذاكرة المحلية (localStorage).
- */
-function loadLog() {
-    const storedLog = localStorage.getItem('detectionLog');
-    if (storedLog) {
-        detectionLog = JSON.parse(storedLog);
-        renderLog();
-    }
-}
-
-/**
- * @function saveLog
- * @description يحفظ الاكتشافات الجديدة في الذاكرة المحلية (localStorage).
- * @param {Array<Object>} predictions - قائمة التنبؤات الحالية.
- */
-function saveLog(predictions) {
-    if (predictions.length > 0) {
-        predictions.forEach(p => {
-            const now = new Date();
-            const logEntry = {
-                class: p.class,
-                score: Math.round(p.score * 100),
-                time: now.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
-            };
-            detectionLog.unshift(logEntry); 
-        });
-
-        // قصر السجل على آخر 50 اكتشافًا لتجنب الامتلاء
-        detectionLog = detectionLog.slice(0, 50); 
-        
-        // حفظ السجل وتحديث الواجهة
-        localStorage.setItem('detectionLog', JSON.stringify(detectionLog));
-        renderLog();
-    }
-}
-
-/**
- * @function renderLog
- * @description عرض السجل المخزّن على واجهة المستخدم.
- */
-function renderLog() {
-    logListElement.innerHTML = ''; // مسح العناصر القديمة
+// تهيئة التطبيق عند تحميل الصفحة
+document.addEventListener('DOMContentLoaded', async () => {
+    console.log('جاري تهيئة تطبيق كشف الأشياء...');
     
-    if (detectionLog.length === 0) {
-         logListElement.innerHTML = '<li>لا توجد اكتشافات مسجلة بعد.</li>';
-         return;
-    }
+    // الحصول على عناصر DOM
+    appState.videoElement = document.getElementById('webcam-video');
+    appState.canvasElement = document.getElementById('detection-canvas');
+    appState.canvasContext = appState.canvasElement.getContext('2d');
+    
+    // تهيئة العناصر
+    initializeElements();
+    
+    // تحميل النموذج
+    await loadModel();
+    
+    // تهيئة الكاميرا
+    await initializeCamera();
+    
+    // إعداد معالجات الأحداث
+    setupEventListeners();
+    
+    console.log('تم تهيئة التطبيق بنجاح!');
+});
 
-    detectionLog.forEach(entry => {
-        const listItem = document.createElement('li');
-        listItem.innerHTML = `
-            <span>تم كشف: <strong>${entry.class}</strong> بنسبة ${entry.score}%</span>
-            <span class="log-time">${entry.time}</span>
-        `;
-        logListElement.appendChild(listItem);
+// تهيئة العناصر
+function initializeElements() {
+    // تعيين حجم Canvas لمطابقة حجم الفيديو
+    const resizeCanvas = () => {
+        if (appState.videoElement.videoWidth) {
+            appState.canvasElement.width = appState.videoElement.videoWidth;
+            appState.canvasElement.height = appState.videoElement.videoHeight;
+        }
+    };
+    
+    // تحديث حجم Canvas عند تغيير حجم النافذة
+    window.addEventListener('resize', resizeCanvas);
+    
+    // تحديث حجم Canvas عند تحميل بيانات الفيديو
+    appState.videoElement.addEventListener('loadeddata', resizeCanvas);
+}
+
+// تحميل نموذج COCO-SSD
+async function loadModel() {
+    try {
+        updateStatus('جاري تحميل نموذج الذكاء الاصطناعي...');
+        
+        // تحميل النموذج
+        appState.model = await cocoSsd.load();
+        appState.isModelLoaded = true;
+        
+        console.log('✅ تم تحميل النموذج بنجاح!');
+        updateStatus('النموذج جاهز!');
+        updateToggleButton();
+        
+    } catch (error) {
+        console.error('❌ فشل تحميل النموذج:', error);
+        updateStatus('فشل تحميل النموذج. يرجى تحديث الصفحة والمحاولة مرة أخرى.');
+    }
+}
+
+// تهيئة الكاميرا
+async function initializeCamera() {
+    try {
+        updateStatus('جاري تهيئة الكاميرا...');
+        
+        // الحصول على صلاحيات الوصول للكاميرا
+        const constraints = {
+            video: {
+                facingMode: appState.currentCamera,
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            }
+        };
+        
+        // بدء تشغيل الكاميرا
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        appState.videoElement.srcObject = stream;
+        appState.currentStream = stream;
+        appState.isCameraActive = true;
+        
+        // تحديث حالة الكاميرا
+        updateCameraStatus();
+        
+        console.log('✅ تم تشغيل الكاميرا بنجاح!');
+        updateStatus('الكاميرا جاهزة!');
+        updateToggleButton();
+        
+    } catch (error) {
+        console.error('❌ فشل تشغيل الكاميرا:', error);
+        
+        // عرض رسالة خطأ مناسبة
+        let errorMessage = 'فشل الوصول إلى الكاميرا. ';
+        
+        if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+            errorMessage += 'لم يتم العثور على كاميرا.';
+        } else if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+            errorMessage += 'تم رفض الإذن للوصول إلى الكاميرا.';
+        } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+            errorMessage += 'الكاميرا قيد الاستخدام حالياً من قبل تطبيق آخر.';
+        } else {
+            errorMessage += `خطأ: ${error.message}`;
+        }
+        
+        updateStatus(errorMessage);
+    }
+}
+
+// تبديل الكاميرا
+async function switchCamera() {
+    if (!appState.currentStream) return;
+    
+    // إيقاف الكاميرا الحالية
+    appState.currentStream.getTracks().forEach(track => track.stop());
+    appState.isCameraActive = false;
+    
+    // تبديل نوع الكاميرا
+    appState.currentCamera = appState.currentCamera === 'user' ? 'environment' : 'user';
+    
+    // إعادة تهيئة الكاميرا
+    await initializeCamera();
+    
+    // إذا كان الكشف قيد التشغيل، إعادة تشغيله
+    if (appState.isDetecting) {
+        startDetection();
+    }
+}
+
+// بدء الكشف
+function startDetection() {
+    if (!appState.isModelLoaded || !appState.isCameraActive || appState.isDetecting) {
+        return;
+    }
+    
+    appState.isDetecting = true;
+    updateToggleButton();
+    updateStatus('جاري الكشف عن الأشياء...');
+    
+    // إظهار قسم الإحصائيات
+    document.getElementById('stats-section').classList.remove('hidden');
+    
+    // بدء حلقة الكشف
+    appState.detectionInterval = setInterval(detectObjects, 100); // 10 FPS
+    
+    console.log('🚀 بدء الكشف عن الأشياء');
+}
+
+// إيقاف الكشف
+function stopDetection() {
+    if (!appState.isDetecting) return;
+    
+    appState.isDetecting = false;
+    clearInterval(appState.detectionInterval);
+    updateToggleButton();
+    updateStatus('تم إيقاف الكشف');
+    
+    // مسح Canvas
+    appState.canvasContext.clearRect(0, 0, appState.canvasElement.width, appState.canvasElement.height);
+    
+    console.log('⏹️ إيقاف الكشف عن الأشياء');
+}
+
+// الكشف عن الأشياء
+async function detectObjects() {
+    if (!appState.model || !appState.isCameraActive) return;
+    
+    // حساب الـ FPS
+    calculateFPS();
+    
+    // الكشف عن الأشياء في الإطار الحالي
+    const predictions = await appState.model.detect(appState.videoElement);
+    
+    // تحديث الإحصائيات
+    updateStats(predictions);
+    
+    // رسم المربعات على Canvas
+    drawDetections(predictions);
+    
+    // تسجيل الاكتشافات الجديدة
+    logDetections(predictions);
+}
+
+// رسم الاكتشافات على Canvas
+function drawDetections(predictions) {
+    // مسح Canvas السابق
+    appState.canvasContext.clearRect(0, 0, appState.canvasElement.width, appState.canvasElement.height);
+    
+    // تحديث عداد الاكتشافات الحية
+    document.getElementById('live-counter').textContent = predictions.length;
+    
+    // رسم مربع لكل كشف
+    predictions.forEach(prediction => {
+        const [x, y, width, height] = prediction.bbox;
+        const label = `${prediction.class} (${Math.round(prediction.score * 100)}%)`;
+        
+        // الحصول على لون ثابت لهذا النوع من الأشياء
+        const color = getObjectColor(prediction.class);
+        
+        // رسم المربع
+        appState.canvasContext.strokeStyle = color;
+        appState.canvasContext.lineWidth = 3;
+        appState.canvasContext.strokeRect(x, y, width, height);
+        
+        // رسم خلفية للنص
+        appState.canvasContext.fillStyle = color;
+        appState.canvasContext.fillRect(x, y - 25, label.length * 10, 25);
+        
+        // كتابة النص
+        appState.canvasContext.fillStyle = '#FFFFFF';
+        appState.canvasContext.font = '16px Arial';
+        appState.canvasContext.fillText(label, x + 5, y - 7);
     });
 }
 
-/**
- * @function clearLog
- * @description مسح السجل بالكامل من الذاكرة والواجهة.
- */
-function clearLog() {
-    if (confirm('هل أنت متأكد من رغبتك في مسح سجل الاكتشافات بالكامل؟')) {
-        localStorage.removeItem('detectionLog');
-        detectionLog = [];
-        renderLog();
-    }
-}
-
-// ------------------------------------------
-// دوال الكشف والتحكم (CORE DETECTION FUNCTIONS)
-// ------------------------------------------
-
-/**
- * @function setupWebcam
- * @description تهيئة وتشغيل كاميرا الويب.
- * @returns {Promise<boolean>} - True إذا نجح التشغيل، False إذا فشل.
- */
-async function setupWebcam() {
-    try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        videoElement.srcObject = stream;
+// تسجيل الاكتشافات
+function logDetections(predictions) {
+    if (appState.isLogPaused) return;
+    
+    const timestamp = new Date();
+    predictions.forEach(prediction => {
+        // زيادة العداد الإجمالي
+        appState.stats.totalDetections++;
         
-        await new Promise((resolve) => {
-            videoElement.onloadeddata = () => {
-                canvasElement.width = videoElement.videoWidth;
-                canvasElement.height = videoElement.videoHeight;
-                videoElement.play(); 
-                resolve();
-            };
-        });
-        return true; 
-
-    } catch (error) {
-        statusElement.textContent = '❌ خطأ: فشل الوصول إلى الكاميرا. (تأكد من الصلاحيات)';
-        return false;
-    }
+        // إضافة الاكتشاف للسجل
+        const logEntry = {
+            id: Date.now() + Math.random(),
+            class: prediction.class,
+            confidence: prediction.score,
+            time: timestamp,
+            x: prediction.bbox[0],
+            y: prediction.bbox[1],
+            width: prediction.bbox[2],
+            height: prediction.bbox[3]
+        };
+        
+        appState.detectionLog.unshift(logEntry);
+        
+        // الحفاظ على الحد الأقصى لعدد العناصر في السجل
+        if (appState.detectionLog.length > appState.maxLogItems) {
+            appState.detectionLog.pop();
+        }
+    });
+    
+    // تحديث عرض السجل
+    updateLogDisplay();
 }
 
-/**
- * @function detectFrame
- * @description دالة متكررة تقوم بإجراء الكشف على إطار الفيديو الحالي.
- */
-function detectFrame() {
-    if (!isDetecting) {
+// تحديث عرض السجل
+function updateLogDisplay() {
+    const logList = document.getElementById('detection-log-list');
+    const emptyMessage = document.getElementById('empty-log-message');
+    
+    // التحقق إذا كان السجل فارغاً
+    if (appState.detectionLog.length === 0) {
+        logList.innerHTML = '';
+        emptyMessage.classList.remove('hidden');
         return;
     }
-
-    if (model && videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
-        model.detect(videoElement).then(predictions => {
-            ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-
-            predictions.forEach(prediction => {
-                drawBoundingBox(prediction);
-            });
-            
-            // حفظ النتيجة في السجل
-            saveLog(predictions); 
-
-            animationFrameId = requestAnimationFrame(detectFrame);
-        });
-    } else {
-         animationFrameId = requestAnimationFrame(detectFrame);
-    }
-}
-
-/**
- * @function drawBoundingBox
- * @description ترسم مربع حول الكائن المكتشف مع اسم الكائن ونسبة الثقة.
- * @param {Object} prediction - كائن التنبؤ من COCO-SSD.
- */
-function drawBoundingBox(prediction) {
-    const [x, y, width, height] = prediction.bbox;
-    const score = Math.round(prediction.score * 100);
-    const label = prediction.class;
     
-    // إعدادات الرسم
-    ctx.strokeStyle = '#FF0000'; 
-    ctx.lineWidth = 3;
-    ctx.fillStyle = '#FF0000'; 
-    ctx.font = 'bold 16px sans-serif';
-
-    // 1. رسم المربع المحيط
-    ctx.beginPath();
-    ctx.rect(x, y, width, height);
-    ctx.stroke();
-
-    // 2. رسم خلفية للنص
-    const text = `${label} (${score}%)`;
-    const textWidth = ctx.measureText(text).width;
-    ctx.fillRect(x, y - 22, textWidth + 8, 22);
-
-    // 3. كتابة النص
-    ctx.fillStyle = '#FFFFFF'; 
-    ctx.fillText(text, x + 4, y - 5);
-}
-
-/**
- * @function toggleDetection
- * @description تبديل حالة الكشف (تشغيل/إيقاف).
- */
-async function toggleDetection() {
-    if (isDetecting) {
-        // --- وضع الإيقاف (STOP) ---
-        isDetecting = false;
-        if (animationFrameId) {
-            cancelAnimationFrame(animationFrameId);
-        }
+    emptyMessage.classList.add('hidden');
+    
+    // تحديث السجل
+    logList.innerHTML = '';
+    
+    appState.detectionLog.forEach(entry => {
+        const li = document.createElement('li');
+        li.className = 'new-detection';
         
-        // إيقاف بث الكاميرا فعلياً
-        if (stream) {
-            stream.getTracks().forEach(track => track.stop());
-            videoElement.srcObject = null;
-        }
-
-        ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-        toggleButton.textContent = '▶️ تشغيل الكشف';
-        statusElement.textContent = '⏸️ تم إيقاف الكشف.';
-    } else {
-        // --- وضع التشغيل (START) ---
-        const success = await setupWebcam();
-        if (success) {
-            isDetecting = true;
-            toggleButton.textContent = '⏸️ إيقاف الكشف';
-            statusElement.textContent = '📡 الكشف قيد التشغيل.';
-            detectFrame(); 
-        } else {
-            isDetecting = false; 
-        }
-    }
+        // إزالة التأثير بعد فترة
+        setTimeout(() => {
+            li.classList.remove('new-detection');
+        }, 500);
+        
+        const confidencePercent = Math.round(entry.confidence * 100);
+        const timeString = entry.time.toLocaleTimeString('ar-EG');
+        
+        li.innerHTML = `
+            <div>
+                <span class="log-item-class">${entry.class}</span>
+                <span class="log-item-confidence">${confidencePercent}%</span>
+            </div>
+            <div class="log-item-time">
+                <i class="far fa-clock"></i> ${timeString}
+            </div>
+            <div style="font-size: 0.8rem; color: #aaa; width: 100%; margin-top: 5px;">
+                الموقع: (${Math.round(entry.x)}, ${Math.round(entry.y)}) - الحجم: ${Math.round(entry.width)}×${Math.round(entry.height)}
+            </div>
+        `;
+        
+        logList.appendChild(li);
+    });
 }
 
-/**
- * @function runInitialLoad
- * @description الدالة الرئيسية التي تبدأ بتحميل النموذج وتجهيز الواجهة.
- */
-async function runInitialLoad() {
-    // 1. تحميل السجل القديم
-    loadLog(); 
+// تحديث الإحصائيات
+function updateStats(predictions) {
+    // تحديث العداد الحالي
+    appState.stats.currentDetections = predictions.length;
     
-    // 2. تحميل نموذج الذكاء الاصطناعي
-    statusElement.textContent = 'جاري تحميل نموذج COCO-SSD... (حجمه كبير نسبياً).';
-    try {
-         model = await cocoSsd.load(); 
-    } catch(e) {
-        statusElement.textContent = '❌ فشل تحميل النموذج. تأكد من اتصالك بالإنترنت.';
+    // تحديث أعلى دقة
+    if (predictions.length > 0) {
+        const maxConfidence = Math.max(...predictions.map(p => p.score));
+        if (maxConfidence > appState.stats.highestConfidence) {
+            appState.stats.highestConfidence = maxConfidence;
+        }
+    }
+    
+    // تحديث عرض الإحصائيات
+    document.getElementById('total-detections').textContent = appState.stats.totalDetections;
+    document.getElementById('current-detections').textContent = appState.stats.currentDetections;
+    document.getElementById('fps-counter').textContent = `${Math.round(appState.stats.fps)} FPS`;
+    document.getElementById('highest-confidence').textContent = `${Math.round(appState.stats.highestConfidence * 100)}%`;
+}
+
+// حساب معدل الإطارات
+function calculateFPS() {
+    const now = performance.now();
+    
+    if (appState.stats.lastFrameTime) {
+        const delta = now - appState.stats.lastFrameTime;
+        appState.stats.fps = 1000 / delta;
+    }
+    
+    appState.stats.lastFrameTime = now;
+}
+
+// الحصول على لون ثابت لكل نوع من الأشياء
+function getObjectColor(className) {
+    if (!appState.objectColors[className]) {
+        // توليد لون عشوائي ثابت بناءً على اسم الكلاس
+        const hue = hashCode(className) % 360;
+        appState.objectColors[className] = `hsl(${hue}, 70%, 50%)`;
+    }
+    
+    return appState.objectColors[className];
+}
+
+// دالة مساعدة لإنشاء hash من نص
+function hashCode(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash) + str.charCodeAt(i);
+        hash |= 0; // تحويل إلى عدد صحيح 32-bit
+    }
+    return Math.abs(hash);
+}
+
+// تحديث حالة زر التبديل
+function updateToggleButton() {
+    const toggleButton = document.getElementById('toggle-button');
+    const cameraButton = document.getElementById('camera-switch');
+    const screenshotButton = document.getElementById('screenshot-button');
+    
+    if (!appState.isModelLoaded || !appState.isCameraActive) {
+        toggleButton.disabled = true;
+        toggleButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>جاري التحميل...</span>';
+        cameraButton.classList.add('hidden');
+        screenshotButton.classList.add('hidden');
         return;
     }
-   
-    // 3. تجهيز الواجهة بعد التحميل
+    
     toggleButton.disabled = false;
-    toggleButton.textContent = '▶️ تشغيل الكشف';
-    statusElement.textContent = '✅ النموذج جاهز. اضغط على "تشغيل الكشف" للبدء.';
+    cameraButton.classList.remove('hidden');
+    screenshotButton.classList.remove('hidden');
     
-    // 4. إضافة مستمعي الأحداث
-    toggleButton.addEventListener('click', toggleDetection);
-    clearLogButton.addEventListener('click', clearLog);
+    if (appState.isDetecting) {
+        toggleButton.innerHTML = '<i class="fas fa-pause"></i><span>إيقاف الكشف</span>';
+        toggleButton.style.background = 'linear-gradient(45deg, #e74c3c, #c0392b)';
+    } else {
+        toggleButton.innerHTML = '<i class="fas fa-play"></i><span>بدء الكشف</span>';
+        toggleButton.style.background = 'linear-gradient(45deg, #4CAF50, #2E7D32)';
+    }
 }
 
-// تشغيل الدالة الرئيسية عند تحميل الصفحة
-window.onload = runInitialLoad;
+// تحديث حالة الكاميرا
+function updateCameraStatus() {
+    const cameraStatus = document.getElementById('camera-status');
+    const cameraType = appState.currentCamera === 'user' ? 'أمامية' : 'خلفية';
+    cameraStatus.textContent = `كاميرا: ${cameraType} (${appState.videoElement.videoWidth}×${appState.videoElement.videoHeight})`;
+}
+
+// تحديث حالة التطبيق
+function updateStatus(message) {
+    const statusElement = document.getElementById('status');
+    statusElement.innerHTML = `<i class="fas fa-info-circle"></i> <span>${message}</span>`;
+}
+
+// إعداد معالجات الأحداث
+function setupEventListeners() {
+    // زر التبديل بين التشغيل والإيقاف
+    document.getElementById('toggle-button').addEventListener('click', () => {
+        if (appState.isDetecting) {
+            stopDetection();
+        } else {
+            startDetection();
+        }
+    });
+    
+    // زر تبديل الكاميرا
+    document.getElementById('camera-switch').addEventListener('click', switchCamera);
+    
+    // زر مسح السجل
+    document.getElementById('clear-log-button').addEventListener('click', () => {
+        if (confirm('هل أنت متأكد من مسح سجل الاكتشافات؟')) {
+            appState.detectionLog = [];
+            updateLogDisplay();
+            
+            // إعادة تعيين بعض الإحصائيات
+            appState.stats.totalDetections = 0;
+            appState.stats.highestConfidence = 0;
+            updateStats([]);
+            
+            console.log('🗑️ تم مسح سجل الاكتشافات');
+        }
+    });
+    
+    // زر تصدير السجل
+    document.getElementById('export-log-button').addEventListener('click', () => {
+        exportLog();
+    });
+    
+    // زر إيقاف/استئناف السجل
+    document.getElementById('pause-log-button').addEventListener('click', function() {
+        appState.isLogPaused = !appState.isLogPaused;
+        
+        if (appState.isLogPaused) {
+            this.innerHTML = '<i class="fas fa-play"></i><span>استئناف السجل</span>';
+            this.style.background = 'linear-gradient(45deg, #4CAF50, #2E7D32)';
+        } else {
+            this.innerHTML = '<i class="fas fa-pause"></i><span>إيقاف السجل</span>';
+            this.style.background = 'linear-gradient(45deg, #e74c3c, #c0392b)';
+        }
+        
+        console.log(appState.isLogPaused ? '⏸️ تم إيقاف السجل' : '▶️ تم استئناف السجل');
+    });
+    
+    // زر التقاط صورة
+    document.getElementById('screenshot-button').addEventListener('click', takeScreenshot);
+}
+
+// التقاط صورة من الكاميرا
+function takeScreenshot() {
+    if (!appState.isCameraActive) return;
+    
+    // إنشاء canvas جديد للصورة
+    const canvas = document.createElement('canvas');
+    canvas.width = appState.videoElement.videoWidth;
+    canvas.height = appState.videoElement.videoHeight;
+    
+    const ctx = canvas.getContext('2d');
+    
+    // رسم الفيديو على canvas
+    ctx.drawImage(appState.videoElement, 0, 0, canvas.width, canvas.height);
+    
+    // رسم الاكتشافات إذا كانت نشطة
+    if (appState.isDetecting && appState.model) {
+        // نستخدم نفس أسلوب الرسم المستخدم في العرض الرئيسي
+        // (في تطبيق حقيقي، قد نعيد استخدام كود drawDetections)
+    }
+    
+    // تحويل canvas إلى صورة
+    const imageUrl = canvas.toDataURL('image/png');
+    
+    // تنزيل الصورة
+    const link = document.createElement('a');
+    link.href = imageUrl;
+    link.download = `كشف-أشياء-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.png`;
+    link.click();
+    
+    console.log('📸 تم التقاط صورة');
+}
+
+// تصدير سجل الاكتشافات
+function exportLog() {
+    if (appState.detectionLog.length === 0) {
+        alert('لا توجد بيانات للتصدير!');
+        return;
+    }
+    
+    // تحويل السجل إلى نص CSV
+    let csvContent = "الوقت,النوع,الدقة,الموقع X,الموقع Y,العرض,الارتفاع\n";
+    
+    appState.detectionLog.forEach(entry => {
+        const time = entry.time.toLocaleString('ar-EG');
+        const confidence = Math.round(entry.confidence * 100);
+        const row = `${time},${entry.class},${confidence}%,${Math.round(entry.x)},${Math.round(entry.y)},${Math.round(entry.width)},${Math.round(entry.height)}`;
+        csvContent += row + "\n";
+    });
+    
+    // إنشاء ملف للتنزيل
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    
+    link.href = url;
+    link.download = `سجل-اكتشاف-أشياء-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    
+    // تحرير الذاكرة
+    URL.revokeObjectURL(url);
+    
+    console.log('📥 تم تصدير سجل الاكتشافات');
+}
+
+// إدارة الذاكرة عند إغلاق الصفحة
+window.addEventListener('beforeunload', () => {
+    if (appState.currentStream) {
+        appState.currentStream.getTracks().forEach(track => track.stop());
+    }
+    
+    if (appState.isDetecting) {
+        clearInterval(appState.detectionInterval);
+    }
+    
+    console.log('🧹 تم تنظيف الموارد قبل إغلاق الصفحة');
+});
+
+// رسالة ترحيب في الكونسول
+console.log(`
+╔══════════════════════════════════════╗
+║   تطبيق كشف الأشياء - الإصدار المحسن   ║
+║      تم التطوير بواسطة HAMZA         ║
+║      (The Coder)                     ║
+╚══════════════════════════════════════╝
+`);
